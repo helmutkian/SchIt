@@ -1,73 +1,99 @@
-(define second cadr)
-(define third caddr)
-(define fourth cadddr)
-
-(define (make-iterator-constructor get inc)
-  (lambda (coll init-ref end?)
-    (let ((ref init-ref))
-      (case-lambda
-	(() (get coll ref))
-	((msg)
-	 (case msg
-	   ('next! (set! ref (inc ref)))
-	   ('end? (end? coll ref))
-	   ('reset! (set! ref init-ref))
-	   (else (error "Iterator error"))))))))
+(define (symbol-append . syms)
+  (string->symbol (apply string-append (map symbol->string syms))))
 
 (define-syntax define-iterator
   (er-macro-transformer
    (lambda (x r c)
-     (let (;; Name of the iterator constructor. Follows the pattern
-	   ;; MAKE-<type>-ITERATOR such as MAKE-LIST-ITERATOR
-	   ;; or MAKE-HASH-ITERATOR
-	   (ctor-name
-	    (string->symbol
-	     (string-append "make-"
-			    (symbol->string (second x))
-			    "-iterator")))
-	   ;; Accessor function
-	   (get (third x))
-	   ;; Returns the next logical element within the container
-	   (inc (fourth x)))
-       ;; Expands to:
-       ;; (define (MAKE-<type>-ITERATOR COLLECTION INITIAL-REF) ...)
-       `(,(r 'define) ,ctor-name (make-iterator-constructor ,get ,inc))))))
+     (let* ((itor-type (second x))
+	    (coll-type (third x))
+	    (ctor-name
+	     (symbol-append 'make- itor-type '- coll-type '-iterator))
+	    (ctor-type
+	     (symbol-append 'make- itor-type '-iterator '-constructor))
+	    (get (fourth x))
+	    (inc (fifth x)))
+       `(,(r 'define) ,ctor-name (,ctor-type ,get ,inc))))))
 
-;;; "Methods"
-
-(define (next! itor)
-  (begin (itor 'next!)
-	 itor))
+;;; Universal Iterator Functions
 
 (define (end? itor)
   (itor 'end?))
 
-(define (reset! itor)
-  (itor 'reset!))
+;;; In-Place Iterator Macro & Functions
 
-(define (iter fn itor)
-  (if (end? itor)
-      (begin (reset! itor)
-	     '())
-      (cons (fn (itor)) (iter fn (next! itor)))))
+(define-syntax define-in-place-iterator
+  (er-macro-transformer
+   (lambda (x r c)
+     (let ((coll-type (second x))
+	   (get (third x))
+	   (inc (fourth x)))
+       `(define-iterator in-place ,coll-type ,get ,inc)))))
 
-;;; Built-in type iterator constructors
+(define (make-in-place-iterator get inc coll init-ref end?)
+  (let ((ref init-ref))
+    (case-lambda
+      (() (get coll ref))
+      ((msg)
+       (case msg
+	 ('next! (set! ref (inc ref)))
+	 ('reset! (set! ref init-ref))
+	 ('end? (end? coll ref))
+	 (else (error "In-Place Iterator Error")))))))
 
-(define-iterator list (lambda (_ r) (car r)) cdr)
+(define (make-in-place-iterator-constructor get inc)
+  (lambda (coll init-ref end?)
+    (make-in-place-iterator get inc coll init-ref end?)))
 
-(define-iterator vector vector-ref (lambda (i) (+ i 1)))
+(define (next! ip-itor)
+  (begin
+    (ip-itor 'next!)
+    ip-itor))
 
-;;; Test cases
+(define (reset! ip-itor)
+  (begin
+    (ip-itor 'reset!)
+    ip-itor))
+
+ 
+;;; Persistent Iterator Macro & Functions
+
+(define-syntax define-persistent-iterator
+  (er-macro-transformer
+   (lambda (x r c)
+     (let ((coll-type (second x))
+	   (get (third x))
+	   (inc (fourth x)))
+       `(define-iterator persistent ,coll-type ,get ,inc)))))
+
+(define (make-persistent-iterator get inc coll init-ref end?)
+  (let ((ref init-ref))
+    (case-lambda
+      (() (get coll ref))
+      ((msg)
+       (case msg
+	 ('next
+	  (make-persistent-iterator get inc coll (inc ref) end?))
+	 ('end? (end? coll ref))
+	 (else (error "Persistent Iterator Error")))))))
+
+(define (make-persistent-iterator-constructor get inc)
+  (lambda (coll init-ref end?)
+    (make-persistent-iterator get inc coll init-ref end?)))
+
+(define (next p-itor)
+  (p-itor 'next))
 
 
-(define l (list 11 22 33 44))
+;;; Tests
 
-(define li (make-list-iterator l l (lambda (_ r) (null? r))))
+(define mvi (define-persistent-iterator vector vector-ref (lambda (i) (+ i 1))))
 
 (define v (vector 11 22 33 44))
 
-(define vi (make-vector-iterator v 0 (lambda (v i) (= i (vector-length v)))))
+(define vpi (make-persistent-vector-iterator v 0 (lambda (_ i) (= i 4))))
 
+(define mli (define-in-place-iterator list (lambda (_ r) (car r)) (lambda (r) (cdr r))))
 
-(define (map+10 itor)
-  (iter (lambda (n) (+ n 10)) itor))
+(define l (list 'a 'b 'c 'd))
+
+(define lipi (make-in-place-list-iterator l l (lambda (_ r) (null? r))))
