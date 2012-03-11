@@ -1,6 +1,10 @@
 (define (symbol-append . syms)
   (string->symbol (apply string-append (map symbol->string syms))))
 
+(define (partial-apply f . args)
+  (lambda rest-args
+    (apply f (append args rest-args))))
+
 (define-syntax define-iterator
   (er-macro-transformer
    (lambda (x r c)
@@ -41,8 +45,7 @@
 	 (else (error "In-Place Iterator Error")))))))
 
 (define (make-in-place-iterator-constructor get inc)
-  (lambda (coll init-ref end?)
-    (make-in-place-iterator get inc coll init-ref end?)))
+  (partial-apply make-in-place-iterator get inc))
 
 (define (next! ip-itor)
   (begin
@@ -77,8 +80,7 @@
 	 (else (error "Persistent Iterator Error")))))))
 
 (define (make-persistent-iterator-constructor get inc)
-  (lambda (coll init-ref end?)
-    (make-persistent-iterator get inc coll init-ref end?)))
+  (partial-apply make-persistent-iterator get inc))
 
 (define (next p-itor)
   (p-itor 'next))
