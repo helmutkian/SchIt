@@ -1,101 +1,118 @@
-(define (symbol-append . syms)
-  (string->symbol (apply string-append (map symbol->string syms))))
+(use (srfi 1 69) vector-lib)
 
-(define (partial-apply f . args)
-  (lambda rest-args
-    (apply f (append args rest-args))))
+;; Redefines call-with-current-continuation to a shorter name call/cc
+(define call/cc call-with-current-continuation)
 
-(define-syntax define-iterator
-  (er-macro-transformer
-   (lambda (x r c)
-     (let* ((itor-type (second x))
-	    (coll-type (third x))
-	    (ctor-name
-	     (symbol-append 'make- itor-type '- coll-type '-iterator))
-	    (ctor-type
-	     (symbol-append 'make- itor-type '-iterator '-constructor))
-	    (get (fourth x))
-	    (inc (fifth x)))
-       `(,(r 'define) ,ctor-name (,ctor-type ,get ,inc))))))
+;; Creates a (call/cc (lambda (...) ...)) form
+(define-syntax let/cc
+  (syntax-rules ()
+    ((_ cont-name body ...)
+     (call/cc (lambda (cont-name) body ...)))))
 
-;;; Universal Iterator Functions
+;; Creates an alist from the sublists provided
+(define-syntax alist
+  (syntax-rules ()
+    ((_ (k0 ...) ...)
+     (list (list k0 ...)
+           ...))))
 
-(define (end? itor)
-  (itor 'end?))
+;; Pushes an object onto a list
+(define-syntax push!
+  (syntax-rules ()
+    ((_ obj lst)
+     (set! lst (cons obj lst)))))
 
-;;; In-Place Iterator Macro & Functions
+;; Alist associating a collection predicate (ie list? vector? hash?)
+;; with an internal iterator and an unpacking function, used to dynamically
+;; dispatch make-iterator on a type.
 
-(define-syntax define-in-place-iterator
-  (er-macro-transformer
-   (lambda (x r c)
-     (let ((coll-type (second x))
-	   (get (third x))
-	   (inc (fourth x)))
-       `(define-iterator in-place ,coll-type ,get ,inc)))))
+(define coll-iterator-list
+  (alist (list? for-each first) 
+          (vector? vector-for-each second)
+          ;(hash-table? (lambda (proc hash) (hash-table-walk hash proc)) (lambda x x))
+          ))
 
-(define (make-in-place-iterator get inc coll init-ref end?)
-  (let ((ref init-ref))
-    (case-lambda
-      (() (get coll ref))
-      ((msg)
-       (case msg
-	 ('next! (set! ref (inc ref)))
-	 ('reset! (set! ref init-ref))
-	 ('end? (end? coll ref))
-	 (else (error "In-Place Iterator Error")))))))
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; make-generic-iterator : collection procedure procedure -> procedure
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; make-generic-iterator takes in a collection, its internal iterator, and
+;; an unpacking function and returns an external iterator.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; IN:
+;;  coll -- A collection
+;;  in-itor -- An internal iterator
+;;  unpack -- An unpacking function
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; OUT:
+;;  Returns an external iterator on the collections
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(define (make-in-place-iterator-constructor get inc)
-  (partial-apply make-in-place-iterator get inc))
+(define (make-generic-iterator coll in-itor unpack)
+  (define (iter) (call/cc control-state))
+  (define (control-state return)
+    (in-itor
+     (lambda current-state
+       ;; Bind returning continuation to intermediate state
+       (set! return
+             ;; Create new intermediate state
+             (let/cc resume-state
+               ;; Redefine current continuation as intermediate state
+               (set! control-state resume-state)
+               ;; Return current state to calling continuation
+               (return (unpack current-state)))))
+     coll)
+    ;; When continuation is exhausted return false
+    (return #f))
+  iter)
 
-(define (next! ip-itor)
-  (begin
-    (ip-itor 'next!)
-    ip-itor))
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; define-iterator : procedure procedure procedure -> side-effect
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; define-iterator takes a type predicate, an internal iterator, and an unpacking
+;; function and allows for run-time dispatching of make-iterator on a collection
+;; that returns #t when the type predicate is applied to it. It does so by
+;; pushing a list associating these procedures onto the coll-iterator-list alist
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; IN:
+;;   type? -- type predicate
+;;   in-itor -- internal iterator, must not return any values but only allow for
+;;              side effects
+;;   unpack -- unpacking function
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; OUT:
+;;   Associates the type predicate with its internal iterator and unpacking
+;;   functions which allows run-time dispatch of make-iterator on the collections
+;;   of that type. Pushes the list containing the associated procedures onto
+;;   coll-iterator-list.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(define (reset! ip-itor)
-  (begin
-    (ip-itor 'reset!)
-    ip-itor))
+(define (define-iterator type? in-itor unpack)
+  (push! (list type? in-itor unpack) coll-iterator-list)) 
 
- 
-;;; Persistent Iterator Macro & Functions
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; make-iterator : collection -> procedure
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; make-iterator takes a collection, then creates the appropriate iterator for the
+;; collection type by looking up the internal iterator and unpacking function
+;; associated with its type predicate. If no type predicate returns true on the
+;; collection, then an error is raised.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; IN:
+;;  coll -- A collection
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
+;; OUT:
+;;  Returns an external iterator for the collection. If none has been defined,
+;;  then it raises an error.
+;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 
-(define-syntax define-persistent-iterator
-  (er-macro-transformer
-   (lambda (x r c)
-     (let ((coll-type (second x))
-	   (get (third x))
-	   (inc (fourth x)))
-       `(define-iterator persistent ,coll-type ,get ,inc)))))
-
-(define (make-persistent-iterator get inc coll init-ref end?)
-  (let ((ref init-ref))
-    (case-lambda
-      (() (get coll ref))
-      ((msg)
-       (case msg
-	 ('next
-	  (make-persistent-iterator get inc coll (inc ref) end?))
-	 ('end? (end? coll ref))
-	 (else (error "Persistent Iterator Error")))))))
-
-(define (make-persistent-iterator-constructor get inc)
-  (partial-apply make-persistent-iterator get inc))
-
-(define (next p-itor)
-  (p-itor 'next))
-
-
-;;; Tests
-
-(define mvi (define-persistent-iterator vector vector-ref (lambda (i) (+ i 1))))
-
-(define v (vector 11 22 33 44))
-
-(define vpi (make-persistent-vector-iterator v 0 (lambda (_ i) (= i 4))))
-
-(define mli (define-in-place-iterator list (lambda (_ r) (car r)) (lambda (r) (cdr r))))
-
-(define l (list 'a 'b 'c 'd))
-
-(define lipi (make-in-place-list-iterator l l (lambda (_ r) (null? r))))
+(define (make-iterator coll)
+  (let loop ((itors coll-iterator-list))
+    (if (null? itors)
+        (error "No internal iterator for type")
+        (let* ((head (first itors))
+               (type? (first head))
+               (in-itor (second head))
+               (unpack (third head)))
+          (if (type? coll)
+              (make-generic-iterator coll in-itor unpack)
+              (loop (cdr itors)))))))
